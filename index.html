@@ -243,7 +243,7 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="title">現金精算票（試作ツール）<span class="version">v1</span></div>
+  <div class="title">現金精算票（試作ツール）<span class="version">v2</span></div>
   <div class="receipt">
     <h1>本日のレジ精算</h1>
     <div class="date-row"><input type="date" id="dateInput"></div>
@@ -524,13 +524,21 @@ async function onSave(){
 dateInput.addEventListener('change', () => loadForDate(dateInput.value));
 addReceiptBtn.addEventListener('click', () => { addReceiptRow(); recalc(); });
 
+function isDateLine(line){
+  return /\d{4}\s*年/.test(line) ||
+         /\d{1,2}\s*月\s*\d{1,2}\s*日/.test(line) ||
+         /\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/.test(line) ||
+         /\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(line);
+}
+
 function extractAmount(text){
   const totalKeywords = ['合計','ごうけい','お会計','総額','お預り'];
-  const excludeKeywords = ['TEL','Tel','tel','FAX','Fax','電話','承認','AUTH','Auth','会員','ポイント','取引','伝票','No.','No ','様','カード番号','有効期限','店番','責任者','番号'];
+  const excludeKeywords = ['TEL','Tel','tel','FAX','Fax','電話','承認','AUTH','Auth','会員','ポイント','取引','伝票','No.','No ','様','カード番号','有効期限','店番','責任者','番号','年'];
   const lines = text.split('\n');
   const candidates = [];
   lines.forEach(line => {
     if(excludeKeywords.some(k => line.includes(k))) return;
+    if(isDateLine(line)) return;
     const nums = line.match(/[0-9][0-9,]{1,}/g);
     if(!nums) return;
     const hasTotalKeyword = totalKeywords.some(k => line.includes(k));
@@ -538,6 +546,10 @@ function extractAmount(text){
       const hasComma = n.includes(',');
       const digitsOnly = n.replace(/,/g, '');
       if(digitsOnly.length > 7) return;
+      if(digitsOnly.length === 4 && !hasComma){
+        const asYear = parseInt(digitsOnly, 10);
+        if(asYear >= 1900 && asYear <= 2099) return;
+      }
       const val = parseInt(digitsOnly, 10);
       if(isNaN(val) || val <= 0) return;
       let score = 0;
