@@ -243,7 +243,7 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="title">現金精算票（試作ツール）<span class="version">v2</span></div>
+  <div class="title">現金精算票（試作ツール）<span class="version">v3</span></div>
   <div class="receipt">
     <h1>本日のレジ精算</h1>
     <div class="date-row"><input type="date" id="dateInput"></div>
@@ -531,36 +531,109 @@ function isDateLine(line){
          /\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(line);
 }
 
-function extractAmount(text){
-  const totalKeywords = ['合計','ごうけい','お会計','総額','お預り'];
-  const excludeKeywords = ['TEL','Tel','tel','FAX','Fax','電話','承認','AUTH','Auth','会員','ポイント','取引','伝票','No.','No ','様','カード番号','有効期限','店番','責任者','番号','年'];
-  const lines = text.split('\n');
-  const candidates = [];
-  lines.forEach(line => {
-    if(excludeKeywords.some(k => line.includes(k))) return;
-    if(isDateLine(line)) return;
-    const nums = line.match(/[0-9][0-9,]{1,}/g);
-    if(!nums) return;
-    const hasTotalKeyword = totalKeywords.some(k => line.includes(k));
-    nums.forEach(n => {
-      const hasComma = n.includes(',');
-      const digitsOnly = n.replace(/,/g, '');
-      if(digitsOnly.length > 7) return;
-      if(digitsOnly.length === 4 && !hasComma){
-        const asYear = parseInt(digitsOnly, 10);
-        if(asYear >= 1900 && asYear <= 2099) return;
-      }
-      const val = parseInt(digitsOnly, 10);
-      if(isNaN(val) || val <= 0) return;
-      let score = 0;
-      if(hasTotalKeyword) score += 10;
-      if(hasComma) score += 5;
-      candidates.push({ val, score });
+function normalizeNumerals(str){
+  return str
+    .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/，/g, ',')
+    .replace(/　/g, ' ');
+}
+
+const TOTAL_KEYWORDS = ['合計','ごうけい','お会計','総額','お預り'];
+const EXCLUDE_KEYWORDS = ['TEL','Tel','tel','FAX','Fax','電話','承認','AUTH','Auth','会員','ポイント','取引','伝票','No.','No ','様','カード番号','有効期限','店番','責任者','番号','年'];
+
+function parseNumberToken(raw){
+  const hasComma = raw.includes(',');
+  const digits = raw.replace(/,/g, '');
+  if(digits.length === 0 || digits.length > 7) return null;
+  if(digits.length === 4 && !hasComma){
+    const y = parseInt(digits, 10);
+    if(y >= 1900 && y <= 2099) return null;
+  }
+  const val = parseInt(digits, 10);
+  if(isNaN(val) || val <= 0) return null;
+  return { val, hasComma };
+}
+
+function extractAmountFromWords(words){
+  if(!words || words.length === 0) return null;
+  const normWords = words
+    .map(w => ({ text: normalizeNumerals(w.text || ''), bbox: w.bbox }))
+    .filter(w => w.bbox);
+
+  const keywordWords = normWords.filter(w => TOTAL_KEYWORDS.some(k => w.text.includes(k)));
+  if(keywordWords.length === 0) return null;
+
+  const numberWords = normWords.map(w => {
+    const m = w.text.match(/[0-9][0-9,]*/);
+    if(!m) return null;
+    const parsed = parseNumberToken(m[0]);
+    if(!parsed) return null;
+    return { ...parsed, bbox: w.bbox };
+  }).filter(Boolean);
+
+  if(numberWords.length === 0) return null;
+
+  let best = null;
+  keywordWords.forEach(kw => {
+    const kwCenterY = (kw.bbox.y0 + kw.bbox.y1) / 2;
+    const kwHeight = Math.max(1, kw.bbox.y1 - kw.bbox.y0);
+    numberWords.forEach(nw => {
+      const nwCenterY = (nw.bbox.y0 + nw.bbox.y1) / 2;
+      if(Math.abs(nwCenterY - kwCenterY) > kwHeight * 1.5) return;
+      const dx = nw.bbox.x0 - kw.bbox.x1;
+      let score = 100 + (nw.hasComma ? 5 : 0) - Math.max(0, dx) * 0.01;
+      if(dx < 0) score -= 50;
+      if(!best || score > best.score){ best = { val: nw.val, score }; }
     });
+  });
+
+  return best ? best.val : null;
+}
+
+function extractAmountFromText(text){
+  const norm = normalizeNumerals(text);
+  const lines = norm.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const candidates = [];
+  lines.forEach((line, idx) => {
+    if(EXCLUDE_KEYWORDS.some(k => line.includes(k))) return;
+    if(isDateLine(line)) return;
+    const hasKeyword = TOTAL_KEYWORDS.some(k => line.includes(k));
+    const nums = line.match(/[0-9][0-9,]*/g) || [];
+    let foundHere = false;
+    nums.forEach(n => {
+      const parsed = parseNumberToken(n);
+      if(!parsed) return;
+      foundHere = true;
+      let score = (hasKeyword ? 10 : 0) + (parsed.hasComma ? 5 : 0);
+      candidates.push({ val: parsed.val, score });
+    });
+    if(hasKeyword && !foundHere){
+      for(let off = 1; off <= 2; off++){
+        const nl = lines[idx + off];
+        if(!nl) break;
+        if(EXCLUDE_KEYWORDS.some(k => nl.includes(k))) break;
+        if(isDateLine(nl)) break;
+        const nlNums = nl.match(/[0-9][0-9,]*/g) || [];
+        let gotOne = false;
+        nlNums.forEach(n => {
+          const parsed = parseNumberToken(n);
+          if(!parsed) return;
+          gotOne = true;
+          candidates.push({ val: parsed.val, score: 8 + (parsed.hasComma ? 5 : 0) });
+        });
+        if(gotOne) break;
+      }
+    }
   });
   if(candidates.length === 0) return null;
   candidates.sort((a,b) => (b.score - a.score) || (b.val - a.val));
   return candidates[0].val;
+}
+
+function extractAmount(data){
+  const fromWords = extractAmountFromWords(data.words);
+  if(fromWords !== null) return fromWords;
+  return extractAmountFromText(data.text || '');
 }
 
 scanReceiptBtn.addEventListener('click', () => receiptPhotoInput.click());
@@ -575,7 +648,7 @@ receiptPhotoInput.addEventListener('change', async (evt) => {
   ocrStatus.textContent = '画像を解析しています（初回は少し時間がかかります）';
   try{
     const result = await Tesseract.recognize(file, 'jpn+eng');
-    const amount = extractAmount(result.data.text || '');
+    const amount = extractAmount(result.data || {});
     if(amount !== null){
       targetInput.value = amount;
       ocrStatus.textContent = '読み取りました。金額が正しいか確認してください。';
