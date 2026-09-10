@@ -119,6 +119,15 @@
     background:transparent; color: var(--copper-dark);
     font-size:14px; border-radius:2px; cursor:pointer;
   }
+  .add-btn.ocr-btn{
+    border: 1px solid var(--copper);
+    color: var(--copper-dark);
+    font-weight: 500;
+  }
+  .ocr-status{
+    text-align:center; font-size:12px; color: var(--ink-soft);
+    min-height: 16px; margin-top: 6px;
+  }
   .subtotal{
     display:flex; justify-content:space-between; margin-top:10px;
     font-size:13px; color:var(--ink-soft);
@@ -251,7 +260,10 @@
     <div class="section">
       <div class="label">本日のレシート（経費）</div>
       <div id="receiptList"></div>
-      <button class="add-btn" id="addReceiptBtn">＋ レシートを追加</button>
+      <button class="add-btn ocr-btn" id="scanReceiptBtn">📷 レシートを撮影して読み取る</button>
+      <input type="file" accept="image/*" capture="environment" id="receiptPhotoInput" style="display:none;">
+      <div class="ocr-status" id="ocrStatus"></div>
+      <button class="add-btn" id="addReceiptBtn">＋ 手入力でレシートを追加</button>
       <div class="subtotal"><span>売上合計</span><span id="salesSubtotal">0円</span></div>
       <div class="subtotal"><span>経費合計</span><span id="expenseSubtotal">0円</span></div>
     </div>
@@ -287,6 +299,7 @@
   </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
 <script>
 const dateInput = document.getElementById('dateInput');
 const prevChangeInput = document.getElementById('prevChange');
@@ -296,6 +309,9 @@ const deliverySales = document.getElementById('deliverySales');
 const nextChangeInput = document.getElementById('nextChange');
 const receiptList = document.getElementById('receiptList');
 const addReceiptBtn = document.getElementById('addReceiptBtn');
+const scanReceiptBtn = document.getElementById('scanReceiptBtn');
+const receiptPhotoInput = document.getElementById('receiptPhotoInput');
+const ocrStatus = document.getElementById('ocrStatus');
 const expenseSubtotal = document.getElementById('expenseSubtotal');
 const salesSubtotal = document.getElementById('salesSubtotal');
 const netBalanceEl = document.getElementById('netBalance');
@@ -501,6 +517,57 @@ async function onSave(){
 
 dateInput.addEventListener('change', () => loadForDate(dateInput.value));
 addReceiptBtn.addEventListener('click', () => { addReceiptRow(); recalc(); });
+
+function extractAmount(text){
+  const totalKeywords = ['合計','ごうけい','お会計','小計','総額','計'];
+  const lines = text.split('\n');
+  const candidates = [];
+  lines.forEach(line => {
+    const nums = line.match(/[0-9][0-9,]{2,}/g);
+    if(!nums) return;
+    const hasKeyword = totalKeywords.some(k => line.includes(k));
+    nums.forEach(n => {
+      const val = parseInt(n.replace(/,/g, ''), 10);
+      if(!isNaN(val) && val > 0 && val < 1000000){
+        candidates.push({ val, priority: hasKeyword ? 2 : 1 });
+      }
+    });
+  });
+  if(candidates.length === 0) return null;
+  candidates.sort((a,b) => (b.priority - a.priority) || (b.val - a.val));
+  return candidates[0].val;
+}
+
+scanReceiptBtn.addEventListener('click', () => receiptPhotoInput.click());
+receiptPhotoInput.addEventListener('change', async (evt) => {
+  const file = evt.target.files[0];
+  if(!file) return;
+  addReceiptRow();
+  const rows = receiptList.querySelectorAll('.receipt-amount');
+  const targetInput = rows[rows.length - 1];
+  targetInput.disabled = true;
+  targetInput.placeholder = '読み取り中…';
+  ocrStatus.textContent = '画像を解析しています（初回は少し時間がかかります）';
+  try{
+    const result = await Tesseract.recognize(file, 'jpn+eng');
+    const amount = extractAmount(result.data.text || '');
+    if(amount !== null){
+      targetInput.value = amount;
+      ocrStatus.textContent = '読み取りました。金額が正しいか確認してください。';
+    }else{
+      targetInput.placeholder = '読み取れませんでした';
+      ocrStatus.textContent = '合計金額を読み取れませんでした。手入力してください。';
+    }
+  }catch(e){
+    targetInput.placeholder = '読み取り失敗';
+    ocrStatus.textContent = '読み取り中にエラーが発生しました。手入力してください。';
+  }finally{
+    targetInput.disabled = false;
+    recalc();
+    receiptPhotoInput.value = '';
+    setTimeout(() => { ocrStatus.textContent = ''; }, 5000);
+  }
+});
 [storeSales, takeoutSales, deliverySales, nextChangeInput, prevChangeInput].forEach(el => {
   el.addEventListener('input', recalc);
 });
