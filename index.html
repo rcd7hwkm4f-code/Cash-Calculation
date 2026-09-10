@@ -519,22 +519,29 @@ dateInput.addEventListener('change', () => loadForDate(dateInput.value));
 addReceiptBtn.addEventListener('click', () => { addReceiptRow(); recalc(); });
 
 function extractAmount(text){
-  const totalKeywords = ['合計','ごうけい','お会計','小計','総額','計'];
+  const totalKeywords = ['合計','ごうけい','お会計','総額','お預り'];
+  const excludeKeywords = ['TEL','Tel','tel','FAX','Fax','電話','承認','AUTH','Auth','会員','ポイント','取引','伝票','No.','No ','様','カード番号','有効期限','店番','責任者','番号'];
   const lines = text.split('\n');
   const candidates = [];
   lines.forEach(line => {
-    const nums = line.match(/[0-9][0-9,]{2,}/g);
+    if(excludeKeywords.some(k => line.includes(k))) return;
+    const nums = line.match(/[0-9][0-9,]{1,}/g);
     if(!nums) return;
-    const hasKeyword = totalKeywords.some(k => line.includes(k));
+    const hasTotalKeyword = totalKeywords.some(k => line.includes(k));
     nums.forEach(n => {
-      const val = parseInt(n.replace(/,/g, ''), 10);
-      if(!isNaN(val) && val > 0 && val < 1000000){
-        candidates.push({ val, priority: hasKeyword ? 2 : 1 });
-      }
+      const hasComma = n.includes(',');
+      const digitsOnly = n.replace(/,/g, '');
+      if(digitsOnly.length > 7) return;
+      const val = parseInt(digitsOnly, 10);
+      if(isNaN(val) || val <= 0) return;
+      let score = 0;
+      if(hasTotalKeyword) score += 10;
+      if(hasComma) score += 5;
+      candidates.push({ val, score });
     });
   });
   if(candidates.length === 0) return null;
-  candidates.sort((a,b) => (b.priority - a.priority) || (b.val - a.val));
+  candidates.sort((a,b) => (b.score - a.score) || (b.val - a.val));
   return candidates[0].val;
 }
 
