@@ -36,6 +36,12 @@
     margin-bottom: 18px;
     opacity: 0.85;
   }
+  .title .version{
+    font-size: 11px;
+    color: rgba(237,239,231,0.55);
+    letter-spacing: 0.02em;
+    margin-left: 6px;
+  }
   .receipt{
     background: var(--paper);
     padding: 26px 22px 34px;
@@ -237,7 +243,7 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="title">現金精算票（試作ツール）</div>
+  <div class="title">現金精算票（試作ツール）<span class="version">v1</span></div>
   <div class="receipt">
     <h1>本日のレジ精算</h1>
     <div class="date-row"><input type="date" id="dateInput"></div>
