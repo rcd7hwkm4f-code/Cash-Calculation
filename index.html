@@ -243,7 +243,7 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="title">現金精算票（試作ツール）<span class="version">v3</span></div>
+  <div class="title">現金精算票（試作ツール）<span class="version">v4</span></div>
   <div class="receipt">
     <h1>本日のレジ精算</h1>
     <div class="date-row"><input type="date" id="dateInput"></div>
@@ -539,7 +539,7 @@ function normalizeNumerals(str){
 }
 
 const TOTAL_KEYWORDS = ['合計','ごうけい','お会計','総額','お預り'];
-const EXCLUDE_KEYWORDS = ['TEL','Tel','tel','FAX','Fax','電話','承認','AUTH','Auth','会員','ポイント','取引','伝票','No.','No ','様','カード番号','有効期限','店番','責任者','番号','年'];
+const EXCLUDE_KEYWORDS = ['TEL','Tel','tel','FAX','Fax','電話','承認','AUTH','Auth','会員','ポイント','取引','伝票','No.','No ','様','カード番号','有効期限','店番','責任者','番号','年','〒'];
 
 function parseNumberToken(raw){
   const hasComma = raw.includes(',');
@@ -554,22 +554,65 @@ function parseNumberToken(raw){
   return { val, hasComma };
 }
 
+// Some receipts render full-width digits spaced out enough that Tesseract
+// treats each digit as its own "word". Merge consecutive pure-digit words
+// on the same row that sit close together back into one number.
+function mergeAdjacentDigitWords(words){
+  const sorted = [...words].sort((a,b) => {
+    const ay = (a.bbox.y0 + a.bbox.y1) / 2, by = (b.bbox.y0 + b.bbox.y1) / 2;
+    if(Math.abs(ay - by) > Math.max(a.bbox.y1-a.bbox.y0, b.bbox.y1-b.bbox.y0) * 0.6) return ay - by;
+    return a.bbox.x0 - b.bbox.x0;
+  });
+  const merged = [];
+  let current = null;
+  sorted.forEach(w => {
+    const isPureDigits = /^[0-9,]+$/.test(w.text);
+    const height = Math.max(1, w.bbox.y1 - w.bbox.y0);
+    const centerY = (w.bbox.y0 + w.bbox.y1) / 2;
+    if(isPureDigits && current && current.pureDigits){
+      const sameRow = Math.abs(centerY - current.centerY) < Math.max(height, current.height) * 0.9;
+      const gap = w.bbox.x0 - current.bbox.x1;
+      if(sameRow && gap < Math.max(height, current.height) * 1.3){
+        current.text += w.text;
+        current.bbox = {
+          x0: Math.min(current.bbox.x0, w.bbox.x0), y0: Math.min(current.bbox.y0, w.bbox.y0),
+          x1: Math.max(current.bbox.x1, w.bbox.x1), y1: Math.max(current.bbox.y1, w.bbox.y1)
+        };
+        current.centerY = (current.bbox.y0 + current.bbox.y1) / 2;
+        current.height = Math.max(1, current.bbox.y1 - current.bbox.y0);
+        return;
+      }
+    }
+    if(current) merged.push(current);
+    current = { text: w.text, bbox: {...w.bbox}, centerY, height, pureDigits: isPureDigits };
+  });
+  if(current) merged.push(current);
+  return merged;
+}
+
 function extractAmountFromWords(words){
   if(!words || words.length === 0) return null;
   const normWords = words
     .map(w => ({ text: normalizeNumerals(w.text || ''), bbox: w.bbox }))
-    .filter(w => w.bbox);
+    .filter(w => w.bbox && w.text.trim().length > 0);
 
-  const keywordWords = normWords.filter(w => TOTAL_KEYWORDS.some(k => w.text.includes(k)));
+  const merged = mergeAdjacentDigitWords(normWords);
+
+  const excludeWords = merged.filter(w => EXCLUDE_KEYWORDS.some(k => w.text.includes(k)));
+  const keywordWords = merged.filter(w => TOTAL_KEYWORDS.some(k => w.text.includes(k)));
   if(keywordWords.length === 0) return null;
 
-  const numberWords = normWords.map(w => {
+  let numberWords = merged.map(w => {
     const m = w.text.match(/[0-9][0-9,]*/);
     if(!m) return null;
     const parsed = parseNumberToken(m[0]);
     if(!parsed) return null;
-    return { ...parsed, bbox: w.bbox };
+    return { ...parsed, bbox: w.bbox, centerY: w.centerY, height: w.height };
   }).filter(Boolean);
+
+  numberWords = numberWords.filter(nw => {
+    return !excludeWords.some(ew => Math.abs(ew.centerY - nw.centerY) < Math.max(nw.height, ew.height) * 0.9);
+  });
 
   if(numberWords.length === 0) return null;
 
@@ -578,8 +621,7 @@ function extractAmountFromWords(words){
     const kwCenterY = (kw.bbox.y0 + kw.bbox.y1) / 2;
     const kwHeight = Math.max(1, kw.bbox.y1 - kw.bbox.y0);
     numberWords.forEach(nw => {
-      const nwCenterY = (nw.bbox.y0 + nw.bbox.y1) / 2;
-      if(Math.abs(nwCenterY - kwCenterY) > kwHeight * 1.5) return;
+      if(Math.abs(nw.centerY - kwCenterY) > kwHeight * 1.5) return;
       const dx = nw.bbox.x0 - kw.bbox.x1;
       let score = 100 + (nw.hasComma ? 5 : 0) - Math.max(0, dx) * 0.01;
       if(dx < 0) score -= 50;
@@ -597,6 +639,7 @@ function extractAmountFromText(text){
   lines.forEach((line, idx) => {
     if(EXCLUDE_KEYWORDS.some(k => line.includes(k))) return;
     if(isDateLine(line)) return;
+    if(/\d{3}\s*-\s*\d{4}/.test(line)) return;
     const hasKeyword = TOTAL_KEYWORDS.some(k => line.includes(k));
     const nums = line.match(/[0-9][0-9,]*/g) || [];
     let foundHere = false;
@@ -613,6 +656,7 @@ function extractAmountFromText(text){
         if(!nl) break;
         if(EXCLUDE_KEYWORDS.some(k => nl.includes(k))) break;
         if(isDateLine(nl)) break;
+        if(/\d{3}\s*-\s*\d{4}/.test(nl)) break;
         const nlNums = nl.match(/[0-9][0-9,]*/g) || [];
         let gotOne = false;
         nlNums.forEach(n => {
