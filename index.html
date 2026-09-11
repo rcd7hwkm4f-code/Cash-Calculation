@@ -252,7 +252,7 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="title">現金精算票（試作ツール）<span class="version">v6</span></div>
+  <div class="title">現金精算票（試作ツール）<span class="version">v13</span></div>
   <div class="receipt">
     <h1>本日のレジ精算</h1>
     <div class="date-row"><input type="date" id="dateInput"></div>
@@ -277,6 +277,8 @@
       <div id="receiptList"></div>
       <button class="add-btn ocr-btn" id="scanReceiptBtn">📷 レシートを撮影して読み取る</button>
       <input type="file" accept="image/*" capture="environment" id="receiptPhotoInput" style="display:none;">
+      <button class="add-btn ocr-btn" id="scanAlbumBtn">🖼️ 写真フォルダからまとめて読み込む</button>
+      <input type="file" accept="image/*" multiple id="receiptAlbumInput" style="display:none;">
       <div class="ocr-status" id="ocrStatus"></div>
       <details class="ocr-raw" id="ocrRawWrap" style="display:none;">
         <summary>読み取った文字を見る</summary>
@@ -318,8 +320,15 @@
   </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+<script src="./tesseract.min.js"></script>
 <script>
+const TESS_OPTIONS = {
+  workerPath: './worker.min.js',
+  corePath: './tesseract-core.wasm.js',
+  langPath: '.',
+  gzip: true
+};
+
 const dateInput = document.getElementById('dateInput');
 const prevChangeInput = document.getElementById('prevChange');
 const storeSales = document.getElementById('storeSales');
@@ -330,6 +339,8 @@ const receiptList = document.getElementById('receiptList');
 const addReceiptBtn = document.getElementById('addReceiptBtn');
 const scanReceiptBtn = document.getElementById('scanReceiptBtn');
 const receiptPhotoInput = document.getElementById('receiptPhotoInput');
+const scanAlbumBtn = document.getElementById('scanAlbumBtn');
+const receiptAlbumInput = document.getElementById('receiptAlbumInput');
 const ocrStatus = document.getElementById('ocrStatus');
 const ocrRawWrap = document.getElementById('ocrRawWrap');
 const ocrRawText = document.getElementById('ocrRawText');
@@ -557,7 +568,7 @@ const EXCLUDE_PATTERNS = [
   /TEL/i, /FAX/i, /AUTH/i,
   /電\s*話/, /承\s*認/, /会\s*員/, /ポ\s*イ\s*ン\s*ト/, /取\s*引/, /伝\s*票/,
   /様/, /カ\s*ー\s*ド\s*番\s*号/, /有\s*効\s*期\s*限/, /店\s*番/, /責\s*任\s*者/,
-  /番\s*号/, /年/, /〒/, /残\s*高/, /枚/, /点/
+  /番\s*号/, /年/, /〒/, /残\s*高/
 ];
 const TOTAL_PATTERNS = [
   /合\s*計/, /ご\s*う\s*け\s*い/, /お\s*会\s*計/, /総\s*額/, /お\s*預\s*り/, /小\s*計/
@@ -582,49 +593,68 @@ function parseNumberToken(raw){
   return { val, hasComma };
 }
 
-function extractAmount(text){
-  const norm = normalizeNumerals(text || '');
-  const lines = norm.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  const candidates = [];
+function stripQuantityTokens(line){
+  return line.replace(/[0-9]+(?:\.[0-9]+)?\s*(?:点|枚)/g, ' ');
+}
 
-  lines.forEach((line, idx) => {
+function scanLinesForCandidates(lineTexts, heightOf){
+  const candidates = [];
+  lineTexts.forEach((line, idx) => {
     if(EXCLUDE_PATTERNS.some(p => p.test(line))) return;
     if(isDateLine(line)) return;
     if(/\d{3}\s*-\s*\d{4}/.test(line)) return;
     const hasKeyword = TOTAL_PATTERNS.some(p => p.test(line));
-    const nums = line.match(/[0-9][0-9,]*/g) || [];
+    const nums = stripQuantityTokens(line).match(/[0-9][0-9,]*/g) || [];
     let foundHere = false;
     nums.forEach(n => {
       const parsed = parseNumberToken(n);
       if(!parsed) return;
       foundHere = true;
-      candidates.push({ val: parsed.val, score: (hasKeyword ? 10 : 0) + (parsed.hasComma ? 5 : 0) });
+      candidates.push({ val: parsed.val, score: (hasKeyword ? 10 : 0) + (parsed.hasComma ? 5 : 0), sizeIdx: idx });
     });
     if(hasKeyword && !foundHere){
       for(let off = 1; off <= 2; off++){
-        const nl = lines[idx + off];
+        const nl = lineTexts[idx + off];
         if(!nl) break;
         if(EXCLUDE_PATTERNS.some(p => p.test(nl))) break;
         if(isDateLine(nl)) break;
         if(/\d{3}\s*-\s*\d{4}/.test(nl)) break;
-        const nlNums = nl.match(/[0-9][0-9,]*/g) || [];
+        const nlNums = stripQuantityTokens(nl).match(/[0-9][0-9,]*/g) || [];
         let gotOne = false;
         nlNums.forEach(n => {
           const parsed = parseNumberToken(n);
           if(!parsed) return;
           gotOne = true;
-          candidates.push({ val: parsed.val, score: 8 + (parsed.hasComma ? 5 : 0) });
+          candidates.push({ val: parsed.val, score: 8 + (parsed.hasComma ? 5 : 0), sizeIdx: idx + off });
         });
         if(gotOne) break;
       }
     }
   });
 
-  if(candidates.length === 0) return null;
+  if(heightOf){
+    const heights = candidates.map(c => heightOf(c.sizeIdx)).filter(h => h > 0);
+    if(heights.length > 2){
+      const sorted = [...heights].sort((a,b) => a-b);
+      const median = sorted[Math.floor(sorted.length/2)];
+      if(median > 0){
+        candidates.forEach(c => {
+          const h = heightOf(c.sizeIdx);
+          if(h > 0){
+            // Totals are often printed noticeably larger than surrounding
+            // lines, so reward text that's clearly bigger than typical.
+            const bonus = Math.min(20, Math.max(0, Math.round((h / median - 1) * 12)));
+            c.score += bonus;
+          }
+        });
+      }
+    }
+  }
+  return candidates;
+}
 
-  // Numbers that recur across the receipt (total repeated in the tax
-  // breakdown, payment line, etc.) are more likely to be the real total
-  // than a one-off number, so give repeats a bonus.
+function pickBestCandidate(candidates){
+  if(candidates.length === 0) return null;
   const bestScore = new Map();
   const freq = new Map();
   candidates.forEach(({val, score}) => {
@@ -639,6 +669,57 @@ function extractAmount(text){
   return totals[0].val;
 }
 
+function extractAmount(data){
+  const text = (typeof data === 'string') ? data : (data && data.text) || '';
+  const rawLines = (data && data.lines) || null;
+
+  if(rawLines && rawLines.length){
+    const lineTexts = rawLines.map(l => normalizeNumerals(l.text || '').trim());
+    const heightOf = (idx) => {
+      const l = rawLines[idx];
+      if(!l || !l.bbox) return 0;
+      return l.bbox.y1 - l.bbox.y0;
+    };
+    const candidates = scanLinesForCandidates(lineTexts, heightOf);
+    const result = pickBestCandidate(candidates);
+    if(result !== null) return result;
+  }
+
+  // Fallback: plain text only, no size information available.
+  const norm = normalizeNumerals(text);
+  const lineTexts = norm.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const candidates = scanLinesForCandidates(lineTexts, null);
+  return pickBestCandidate(candidates);
+}
+
+function preprocessImage(file){
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = img.width < 1800 ? 1800 / img.width : 1;
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      try{
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const d = imageData.data;
+        for(let i = 0; i < d.length; i += 4){
+          const gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+          const c = Math.min(255, Math.max(0, (gray - 128) * 1.4 + 128));
+          d[i] = d[i+1] = d[i+2] = c;
+        }
+        ctx.putImageData(imageData, 0, 0);
+      }catch(e){ /* if canvas access fails, fall back to the plain resize */ }
+      canvas.toBlob(blob => resolve(blob || file), 'image/png');
+    };
+    img.onerror = () => resolve(file);
+    img.src = URL.createObjectURL(file);
+  });
+}
+
 scanReceiptBtn.addEventListener('click', () => receiptPhotoInput.click());
 receiptPhotoInput.addEventListener('change', async (evt) => {
   const file = evt.target.files[0];
@@ -650,11 +731,12 @@ receiptPhotoInput.addEventListener('change', async (evt) => {
   targetInput.placeholder = '読み取り中…';
   ocrStatus.textContent = '画像を解析しています（初回は少し時間がかかります）';
   try{
-    const result = await Tesseract.recognize(file, 'jpn+eng');
+    const processed = await preprocessImage(file);
+    const result = await Tesseract.recognize(processed, 'jpn+eng', TESS_OPTIONS);
     const rawText = result.data.text || '';
     ocrRawText.value = rawText;
     ocrRawWrap.style.display = rawText.trim() ? 'block' : 'none';
-    const amount = extractAmount(rawText);
+    const amount = extractAmount(result.data || {});
     if(amount !== null){
       targetInput.value = amount;
       ocrStatus.textContent = '読み取りました。金額が正しいか確認してください。';
@@ -665,6 +747,8 @@ receiptPhotoInput.addEventListener('change', async (evt) => {
   }catch(e){
     targetInput.placeholder = '読み取り失敗';
     ocrStatus.textContent = '読み取り中にエラーが発生しました。手入力してください。';
+    ocrRawText.value = 'エラー内容: ' + ((e && e.message) ? e.message : String(e));
+    ocrRawWrap.style.display = 'block';
   }finally{
     targetInput.disabled = false;
     recalc();
@@ -672,6 +756,48 @@ receiptPhotoInput.addEventListener('change', async (evt) => {
     setTimeout(() => { ocrStatus.textContent = ''; }, 5000);
   }
 });
+
+scanAlbumBtn.addEventListener('click', () => receiptAlbumInput.click());
+receiptAlbumInput.addEventListener('change', async (evt) => {
+  const files = Array.from(evt.target.files || []);
+  if(files.length === 0) return;
+  let rawLog = '';
+
+  for(let i = 0; i < files.length; i++){
+    const file = files[i];
+    addReceiptRow();
+    const rows = receiptList.querySelectorAll('.receipt-amount');
+    const targetInput = rows[rows.length - 1];
+    targetInput.disabled = true;
+    targetInput.placeholder = '読み取り中…';
+    ocrStatus.textContent = `${i + 1}/${files.length}枚を読み取っています…`;
+    try{
+      const processed = await preprocessImage(file);
+      const result = await Tesseract.recognize(processed, 'jpn+eng', TESS_OPTIONS);
+      const rawText = result.data.text || '';
+      rawLog += `--- ${i + 1}枚目: ${file.name || ''} ---\n${rawText}\n\n`;
+      const amount = extractAmount(result.data || {});
+      if(amount !== null){
+        targetInput.value = amount;
+      }else{
+        targetInput.placeholder = '読み取れませんでした';
+      }
+    }catch(e){
+      targetInput.placeholder = '読み取り失敗';
+      rawLog += `--- ${i + 1}枚目: ${file.name || ''} でエラー ---\n${(e && e.message) ? e.message : String(e)}（通信状況の影響の可能性があります）\n\n`;
+    }finally{
+      targetInput.disabled = false;
+      recalc();
+    }
+  }
+
+  ocrRawText.value = rawLog;
+  ocrRawWrap.style.display = rawLog.trim() ? 'block' : 'none';
+  ocrStatus.textContent = `${files.length}枚の読み取りが完了しました。金額を1件ずつ確認してください。`;
+  receiptAlbumInput.value = '';
+  setTimeout(() => { ocrStatus.textContent = ''; }, 6000);
+});
+
 [storeSales, takeoutSales, deliverySales, nextChangeInput, prevChangeInput].forEach(el => {
   el.addEventListener('input', recalc);
 });
