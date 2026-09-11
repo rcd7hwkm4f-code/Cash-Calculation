@@ -252,7 +252,7 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="title">現金精算票（試作ツール）<span class="version">v13</span></div>
+  <div class="title">現金精算票（試作ツール）<span class="version">v14</span></div>
   <div class="receipt">
     <h1>本日のレジ精算</h1>
     <div class="date-row"><input type="date" id="dateInput"></div>
@@ -565,7 +565,7 @@ function normalizeNumerals(str){
 }
 
 const EXCLUDE_PATTERNS = [
-  /TEL/i, /FAX/i, /AUTH/i,
+  /TEL/i, /FAX/i, /AUTH/i, /X{4,}/i,
   /電\s*話/, /承\s*認/, /会\s*員/, /ポ\s*イ\s*ン\s*ト/, /取\s*引/, /伝\s*票/,
   /様/, /カ\s*ー\s*ド\s*番\s*号/, /有\s*効\s*期\s*限/, /店\s*番/, /責\s*任\s*者/,
   /番\s*号/, /年/, /〒/, /残\s*高/
